@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>LeWorld – Physics Tests</title>
+<style>
+  body { background: #1a1423; color: #fff8e7; font: 14px/1.5 ui-monospace, monospace; padding: 16px; }
+  .pass { color: #46c25a; } .fail { color: #ff5a6e; } h1 { color: #ff4f8a; font-size: 18px; }
+  small { opacity: .7; }
+</style>
+</head>
+<body>
+<h1>LeWorld physics tests</h1>
+<div id="summary"></div>
+<ol id="out"></ol>
+
+<script src="src/gfx/core.js"></script>
+<script src="src/gfx/font.js"></script>
+<script src="src/gfx/sprites.js"></script>
+<script src="src/gfx/tiles.js"></script>
+<script src="src/config.js"></script>
+<script src="src/data/content.js"></script>
+<script src="src/engine/level.js"></script>
+<script src="src/engine/physics.js"></script>
+<script src="src/engine/player.js"></script>
+<script src="src/engine/enemy.js"></script>
+<script src="src/engine/hazards.js"></script>
+<script src="src/engine/session.js"></script>
+<script src="src/engine/world.js"></script>
+<script src="src/engine/reach.js"></script>
+<script src="src/levels/l1.js"></script>
+<script src="src/levels/l2.js"></script>
+<script src="src/levels/l3.js"></script>
+<script src="src/levels/l4.js"></script>
+<script src="src/levels/l5.js"></script>
+<script src="src/levels/l6.js"></script>
+<script src="src/levels/l7.js"></script>
+<script src="src/levels/index.js"></script>
+<script>
+const STEP = LW.CFG.STEP, PC = LW.CFG.player, T = LW.TILE;
+const C0 = { left: false, right: false, down: false, jumpHeld: false, fireHeld: false, jumpPressed: false, firePressed: false };
+const c = o => Object.assign({}, C0, o || {});
+const steps = s => Math.round(s / STEP);
+const GROUND_Y = 9 * T; // ground surface in all test maps
+
+function makeWorld(map, session) { return new LW.World({ id: 'unit', name: 'test', theme: 'street', map }, session); }
+const INVULN = LW.CFG.difficulty.casual.invulnTime;
+function blank(w, h) { return Array.from({ length: h }, () => '.'.repeat(w)); }
+function edit(rows, x, y, ch) { rows[y] = rows[y].slice(0, x) + ch + rows[y].slice(x + 1); }
+// Flat map: ground row 9..11 across [g0, g1], P at column px on row py.
+function flat(opts) {
+  const o = Object.assign({ w: 40, g0: 0, g1: 39, px: 5, py: 8 }, opts);
+  const r = blank(o.w, 12);
+  for (let y = 9; y < 12; y++) for (let x = o.g0; x <= o.g1; x++) edit(r, x, y, '#');
+  edit(r, o.px, o.py, 'P');
+  (o.extra || []).forEach(([x, y, ch]) => edit(r, x, y, ch));
+  return r;
+}
+function run(w, seconds, ctl, each) {
+  const n = steps(seconds);
+  for (let i = 0; i < n; i++) { w.step(STEP, typeof ctl === 'function' ? ctl(i) : c(ctl)); if (each && each(i) === false) return i; }
+  return n;
+}
+function settle(w) { run(w, 0.5, {}); }
+function apexRise(ctlAfterPress) {
+  const w = makeWorld(flat()); settle(w);
+  const p = w.player, y0 = p.y; let minY = y0;
+  run(w, 1.2, i => i === 0 ? c({ jumpPressed: true, jumpHeld: true }) : c(ctlAfterPress(i)), () => { minY = Math.min(minY, p.y); });
+  return y0 - minY;
+}
+function events(w, type) { return w.events.filter(e => e.type === type).length; }
+
+const tests = [];
+const test = (name, fn) => tests.push([name, fn]);
+const approx = (a, b, tol) => Math.abs(a - b) <= tol;
+
+// ---------------------------------------------------------------- landing & ground
+test('Falls and lands exactly on the ground', () => {
+  const w = makeWorld(flat({ py: 3 })); run(w, 1.5, {});
+  const p = w.player;
+  return [p.onGround && approx(p.y + p.h, GROUND_Y, 0.01), `feet=${(p.y + p.h).toFixed(2)} ground=${GROUND_Y} onGround=${p.onGround}`];
+});
+test('Standing still stays grounded (no jitter)', () => {
+  const w = makeWorld(flat()); settle(w);
+  let ok = true; const p = w.player;
+  run(w, 2, {}, () => { if (!p.onGround || !approx(p.y + p.h, GROUND_Y, 0.01)) ok = false; });
+  return [ok, 'grounded for 2s'];
+});
+
+// ---------------------------------------------------------------- horizontal feel
+test('Accelerates quickly to top speed (< 0.15s)', () => {
+  const w = makeWorld(flat()); settle(w);
+  let t = null;
+  run(w, 1, { right: true }, i => { if (t === null && w.player.vx >= PC.maxSpeed * 0.98) t = (i + 1) * STEP; });
+  return [t !== null && t < 0.15, `reached ${PC.maxSpeed}px/s in ${t && (t * 1000).toFixed(0)}ms`];
+});
+test('A little momentum: slides briefly, then stops (< 0.15s)', () => {
+  const w = makeWorld(flat()); settle(w); run(w, 0.5, { right: true });
+  const x0 = w.player.x; let t = null;
+  run(w, 1, {}, i => { if (t === null && w.player.vx === 0) t = (i + 1) * STEP; });
+  const slide = w.player.x - x0;
+  return [slide > 1 && t < 0.15, `slid ${slide.toFixed(1)}px, stopped in ${(t * 1000).toFixed(0)}ms`];
+});
+test('Walls stop Hunter flush', () => {
+  const w = makeWorld(flat({ extra: [[12, 8, 'B'], [12, 7, 'B']] })); settle(w);
+  run(w, 2, { right: true });
+  const p = w.player;
+  return [approx(p.x + p.w, 12 * T, 0.01) && p.vx === 0, `right edge=${(p.x + p.w).toFixed(2)} wall=${12 * T}`];
+});
+
+// ---------------------------------------------------------------- jumping
+test('Jump reaches the fixed height', () => {
+  const rise = apexRise(() => ({ jumpHeld: true }));
+  return [approx(rise, PC.jumpHeight, 2), `rise ${rise.toFixed(1)}px, target ${PC.jumpHeight}px`];
+});
+test('Releasing jump early does NOT shorten it', () => {
+  const full = apexRise(() => ({ jumpHeld: true }));
+  const tap = apexRise(() => ({}));
+  return [approx(full, tap, 0.01), `held ${full.toFixed(2)}px vs tapped ${tap.toFixed(2)}px`];
+});
+test('No double jump', () => {
+  const single = apexRise(() => ({ jumpHeld: true }));
+  const dbl = apexRise(i => i === steps(0.2) ? { jumpPressed: true, jumpHeld: true } : {});
+  const w = makeWorld(flat()); settle(w);
+  run(w, 0.25, i => c(i === 0 || i === steps(0.2) ? { jumpPressed: true } : {}));
+  return [approx(single, dbl, 0.01) && events(w, 'jump') === 1, `apex single ${single.toFixed(1)} vs pressed twice ${dbl.toFixed(1)}, jumps=${events(w, 'jump')}`];
+});
+test('Head bonks on a ceiling', () => {
+  const w = makeWorld(flat({ extra: [[5, 6, 'B']] })); settle(w);
+  // ceiling bottom = 7*16 = 112; standing head = 144-22 = 122
+  let minY = 999;
+  run(w, 0.8, i => c(i === 0 ? { jumpPressed: true } : {}), () => { minY = Math.min(minY, w.player.y); });
+  return [approx(minY, 7 * T, 0.01) && w.player.onGround, `head stopped at y=${minY.toFixed(2)} (ceiling ${7 * T})`];
+});
+test('Jumps up through a one-way ledge and lands on it', () => {
+  const ex = []; for (let x = 3; x < 9; x++) ex.push([x, 7, '-']);
+  const w = makeWorld(flat({ extra: ex })); settle(w);
+  run(w, 1.2, i => c(i === 0 ? { jumpPressed: true } : {}));
+  const p = w.player;
+  return [p.onGround && approx(p.y + p.h, 7 * T, 0.01), `feet=${(p.y + p.h).toFixed(2)} ledge top=${7 * T}`];
+});
+
+// ---------------------------------------------------------------- coyote time & buffering
+function coyoteTry(delay) {
+  const w = makeWorld(flat({ g0: 0, g1: 9, px: 6 })); settle(w);
+  const p = w.player; let left = null, jumped = false;
+  run(w, 2, i => {
+    if (left === null && !p.onGround && p.vy >= 0) left = i;
+    return c({ right: true, jumpPressed: left !== null && i === left + steps(delay) });
+  }, () => { if (w.events.some(e => e.type === 'jump')) jumped = true; w.events.length = 0; });
+  return jumped;
+}
+test('Coyote time: jump 80ms after leaving a ledge still works', () => {
+  const ok = coyoteTry(0.08); return [ok, 'jumped=' + ok];
+});
+test('Coyote time: jump 140ms after leaving a ledge does not', () => {
+  const ok = !coyoteTry(0.14); return [ok, 'jumped=' + !ok];
+});
+function bufferTry(early) {
+  const probe = makeWorld(flat({ py: 2 })); let land = null;
+  run(probe, 2, {}, i => { if (land === null && probe.player.onGround) land = i; });
+  const w = makeWorld(flat({ py: 2 })); let jumpedAt = null;
+  run(w, 2, i => c({ jumpPressed: i === land - steps(early) }), i => {
+    if (jumpedAt === null && w.events.some(e => e.type === 'jump')) jumpedAt = i;
+    w.events.length = 0;
+  });
+  return { land, jumpedAt };
+}
+test('Jump buffer: pressed 100ms before landing fires on landing', () => {
+  const r = bufferTry(0.10);
+  return [r.jumpedAt !== null && r.jumpedAt - r.land <= 1, `landed step ${r.land}, jumped step ${r.jumpedAt}`];
+});
+test('Jump buffer: pressed 160ms before landing is ignored', () => {
+  const r = bufferTry(0.16);
+  return [r.jumpedAt === null, `jumped step ${r.jumpedAt}`];
+});
+
+// ---------------------------------------------------------------- crouch
+test('Crouch shrinks the hitbox, keeps feet planted, stops movement', () => {
+  const w = makeWorld(flat()); settle(w);
+  const p = w.player, x0 = p.x;
+  run(w, 0.5, { down: true, right: true });
+  return [p.crouching && p.h === PC.crouchH && approx(p.y + p.h, GROUND_Y, 0.01) && approx(p.x, x0, 0.01) && p.anim === 'hunter_crouch',
+    `h=${p.h} feet=${(p.y + p.h).toFixed(1)} moved=${(p.x - x0).toFixed(2)} anim=${p.anim}`];
+});
+test('Cannot stand up under a low ceiling; stands once clear', () => {
+  const w = makeWorld(flat()); settle(w);
+  const p = w.player;
+  run(w, 0.2, { down: true });
+  const tx = Math.floor((p.x + p.w / 2) / T);
+  w.level.grid[7 * w.level.w + tx] = LW.Level.SOLID;   // drop a ceiling 16px above the floor
+  run(w, 0.3, {});
+  const stuck = p.crouching;
+  w.level.grid[7 * w.level.w + tx] = 0;
+  run(w, 0.1, {});
+  return [stuck && !p.crouching && p.h === PC.h, `stayed crouched=${stuck}, stood after clearing=${!p.crouching}`];
+});
+
+// ---------------------------------------------------------------- enemies
+test('Stomp defeats an enemy and bounces Hunter upward', () => {
+  const w = makeWorld(flat({ py: 2, px: 10, extra: [[10, 8, 'e']] }));
+  w.enemies[0].update = function () {};               // hold still for a clean drop
+  let bounced = false, stompStep = null;
+  run(w, 1.5, {}, i => { if (stompStep === null && w.events.some(e => e.type === 'stomp')) { stompStep = i; bounced = w.player.vy < 0; } });
+  const e = w.enemies[0];
+  return [stompStep !== null && bounced && events(w, 'hurt') === 0, `stomped=${stompStep !== null} bounced=${bounced} hurt=${events(w, 'hurt')} enemyAlive=${e ? e.alive : 'removed'}`];
+});
+test('Side contact hurts Hunter instead of defeating the enemy', () => {
+  const w = makeWorld(flat({ px: 5, extra: [[9, 8, 'e']] }));
+  run(w, 4, {}, () => { if (w.events.some(e => e.type === 'hurt')) return false; });
+  const e = w.enemies[0];
+  return [events(w, 'hurt') >= 1 && e && e.alive && events(w, 'stomp') === 0, `hurt=${events(w, 'hurt')} stomp=${events(w, 'stomp')} enemyAlive=${e && e.alive}`];
+});
+test('Invulnerability: one collision cannot remove several hearts', () => {
+  const w = makeWorld(flat({ px: 5, extra: [[7, 8, 'e']] }));
+  const e = w.enemies[0];
+  e.update = function () {};                            // enemy parked right beside Hunter
+  run(w, INVULN * 0.9, { right: true });
+  return [events(w, 'hurt') === 1 && w.hearts === 2, `hurt events while pressing into enemy for ${(INVULN * 0.9).toFixed(2)}s: ${events(w, 'hurt')}, hearts=${w.hearts}`];
+});
+
+// ---------------------------------------------------------------- hazards & pits
+test('Spikes hurt', () => {
+  const w = makeWorld(flat({ extra: [[8, 9, '^']] })); settle(w);
+  run(w, 1, { right: true });
+  return [events(w, 'hurt') >= 1, `hurt=${events(w, 'hurt')}`];
+});
+test('Falling into a gap returns Hunter to the respawn point', () => {
+  const w = makeWorld(flat({ g0: 0, g1: 8, px: 4 })); settle(w);
+  let fell = false;
+  run(w, 3, { right: true }, () => { if (w.events.some(e => e.type === 'fell')) { fell = true; return false; } });
+  const p = w.player;
+  return [fell && approx(p.x + p.w / 2, w.respawn.x, 0.01), `fell=${fell} x=${(p.x + p.w / 2).toFixed(1)} respawn=${w.respawn.x}`];
+});
+
+// ---------------------------------------------------------------- hearts, defeat & checkpoints
+const R = LW.CFG.rules;
+function hitOnce(w) { w.player.invuln = 0; return w.hit(w.player.x + 50, 'enemy'); }
+test('Starts with three hearts; the third hit ends the attempt', () => {
+  const w = makeWorld(flat()); settle(w);
+  const start = w.hearts;
+  hitOnce(w); hitOnce(w); const after2 = w.hearts; hitOnce(w);
+  run(w, 0.2, {});
+  return [start === 3 && after2 === 1 && w.hearts === 0 && w.state === 'defeated' && events(w, 'defeated') === 1,
+    `start=${start} after two hits=${after2} after three=${w.hearts} state=${w.state}`];
+});
+test('Falling into a gap costs a heart and returns to the latest checkpoint', () => {
+  const w = makeWorld(flat({ g0: 0, g1: 14, px: 2, extra: [[8, 8, 'C']] })); settle(w);
+  let fell = false;
+  run(w, 4, { right: true }, () => { if (w.events.some(e => e.type === 'fell')) { fell = true; return false; } });
+  const p = w.player;
+  return [fell && w.hearts === 2 && approx(p.x + p.w / 2, 8 * T + 8, 0.01), `fell=${fell} hearts=${w.hearts} respawnX=${(p.x + p.w / 2).toFixed(1)} checkpointX=${8 * T + 8}`];
+});
+test('Reaching a checkpoint does not restore hearts', () => {
+  const w = makeWorld(flat({ extra: [[9, 8, 'C']] })); settle(w);
+  hitOnce(w); const before = w.hearts; w.player.vx = 0;
+  run(w, 2, { right: true });
+  return [w.checkpoints[0].active && w.hearts === before, `checkpoint active=${w.checkpoints[0].active} hearts ${before} -> ${w.hearts}`];
+});
+test('Restart after defeat: level start, three hearts, checkpoints reset', () => {
+  const session = LW.Session.create('casual');
+  const map = flat({ px: 2, extra: [[6, 8, 'C']] });
+  const w = makeWorld(map, session); settle(w);
+  run(w, 1, { right: true });
+  const cpWas = w.checkpoints[0].active;
+  hitOnce(w); hitOnce(w); hitOnce(w);
+  const w2 = makeWorld(map, session);
+  return [cpWas && w.state === 'defeated' && w2.hearts === 3 && !w2.checkpoints[0].active && approx(w2.player.x + w2.player.w / 2, 2 * T + 8, 0.01),
+    `defeated=${w.state === 'defeated'} new hearts=${w2.hearts} checkpoint reset=${!w2.checkpoints[0].active} startX=${w2.player.x + w2.player.w / 2}`];
+});
+test('Reaching the goal completes the level', () => {
+  const w = makeWorld(flat({ extra: [[10, 8, 'G']] })); settle(w);
+  run(w, 2, { right: true });
+  return [w.state === 'complete' && events(w, 'complete') === 1, `state=${w.state}`];
+});
+
+// ---------------------------------------------------------------- collectibles & scoring
+test('Books score 100 and tools 50, once each', () => {
+  const session = LW.Session.create('casual');
+  const w = makeWorld(flat({ extra: [[7, 8, 'b'], [9, 8, 't']] }), session); settle(w);
+  run(w, 1.5, { right: true });
+  return [session.score === R.bookPoints + R.toolPoints, `score=${session.score}`];
+});
+test('No score farming: restarting and re-collecting awards nothing', () => {
+  const session = LW.Session.create('casual');
+  const map = flat({ extra: [[7, 8, 'b'], [8, 8, 'b'], [9, 8, 't']] });
+  const w = makeWorld(map, session); settle(w); run(w, 1.5, { right: true });
+  const first = session.score;
+  const w2 = makeWorld(map, session);
+  const faded = w2.items.every(it => it.scored);
+  settle(w2); run(w2, 1.5, { right: true });
+  return [first === 250 && session.score === 250 && faded && w2.booksThisAttempt === 2,
+    `after first run ${first}, after restart ${session.score}, items shown as already scored=${faded}, books still count toward power-up=${w2.booksThisAttempt}`];
+});
+test('Three books unlock Radical Reader Mode; damage does not remove it', () => {
+  const w = makeWorld(flat({ extra: [[7, 8, 'b'], [8, 8, 'b'], [9, 8, 'b']] })); settle(w);
+  run(w, 0.3, { right: true }); const afterTwo = w.firing;
+  run(w, 1.2, { right: true });
+  const unlocked = w.firing; hitOnce(w);
+  return [!afterTwo && unlocked && w.firing && events(w, 'unlockFire') === 1, `firing before third book=${afterTwo}, after=${unlocked}, after damage=${w.firing}`];
+});
+test('Cannot fire before the power-up is unlocked', () => {
+  const w = makeWorld(flat()); settle(w);
+  run(w, 0.5, { firePressed: true, fireHeld: true });
+  return [w.shots.length === 0, `shots=${w.shots.length}`];
+});
+test('MALE LONELINESS shot defeats an enemy', () => {
+  const w = makeWorld(flat({ px: 3, extra: [[12, 8, 'e']] })); settle(w);
+  w.firing = true; w.enemies[0].update = function () { if (!this.alive) this.dead = true; };
+  run(w, 1.2, i => c({ firePressed: i === 0 }));
+  return [events(w, 'shotHit') === 1 && w.enemies.length === 0, `hits=${events(w, 'shotHit')} enemies left=${w.enemies.length}`];
+});
+test('Firing has a cooldown and a limit on shots on screen', () => {
+  const w = makeWorld(flat({ w: 60, g1: 59 })); settle(w); w.firing = true;
+  let maxLive = 0; const cd = w.diff.fireCooldown;
+  run(w, 3, { fireHeld: true, firePressed: true }, () => { maxLive = Math.max(maxLive, w.shots.filter(s => s.live).length); });
+  const fired = events(w, 'fire');
+  const w2 = makeWorld(flat()); settle(w2); w2.firing = true;
+  run(w2, cd * 0.9, { fireHeld: true, firePressed: true });
+  return [maxLive <= LW.CFG.shot.maxActive && events(w2, 'fire') === 1 && fired > 2,
+    `max live shots=${maxLive} (limit ${LW.CFG.shot.maxActive}), shots within one cooldown=${events(w2, 'fire')}, total in 3s=${fired}`];
+});
+test('Every three tools restore a heart', () => {
+  const w = makeWorld(flat({ extra: [[7, 8, 't'], [8, 8, 't'], [9, 8, 't']] })); settle(w);
+  hitOnce(w); const hurt = w.hearts; w.player.vx = 0;
+  run(w, 2, { right: true });
+  return [hurt === 2 && w.hearts === 3 && w.charges === 0, `hearts ${hurt} -> ${w.hearts}, stored charges=${w.charges}`];
+});
+test('At full health a repair charge is held, then spent on the next lost heart', () => {
+  const w = makeWorld(flat({ extra: [[7, 8, 't'], [8, 8, 't'], [9, 8, 't']] })); settle(w);
+  run(w, 2, { right: true });
+  const stored = w.charges;
+  hitOnce(w);
+  return [stored === 1 && w.charges === 0 && w.hearts === 3, `stored=${stored}, after hit: charges=${w.charges} hearts=${w.hearts}`];
+});
+test('Tool progress shows partial count toward the next charge', () => {
+  const w = makeWorld(flat({ extra: [[7, 8, 't'], [8, 8, 't']] })); settle(w);
+  run(w, 1.5, { right: true });
+  return [w.toolProgress === 2, `progress=${w.toolProgress}/${R.toolsPerRepair}`];
+});
+
+// ---------------------------------------------------------------- difficulty
+test('Casual has extra tools and wider landings; Challenge does not', () => {
+  const map = flat({ extra: [[7, 8, 'T'], [8, 8, 't'], [12, 7, '+']] });
+  const cas = makeWorld(map, LW.Session.create('casual'));
+  const cha = makeWorld(map, LW.Session.create('challenge'));
+  const solidAt = w => w.level.at(12, 7) === LW.Level.SOLID;
+  return [cas.items.length === 2 && cha.items.length === 1 && solidAt(cas) && !solidAt(cha),
+    `tools casual=${cas.items.length} challenge=${cha.items.length}; '+' solid casual=${solidAt(cas)} challenge=${solidAt(cha)}`];
+});
+test('Challenge enemies are faster than Casual', () => {
+  const map = flat({ extra: [[12, 8, 'e']] });
+  const cas = makeWorld(map, LW.Session.create('casual')), cha = makeWorld(map, LW.Session.create('challenge'));
+  return [cha.enemies[0].speed > cas.enemies[0].speed, `casual ${cas.enemies[0].speed} vs challenge ${cha.enemies[0].speed}`];
+});
+
+// ---------------------------------------------------------------- enemies
+const EC = LW.CFG.enemies;
+const enemy = (w, cls) => w.enemies.find(e => e.constructor.name === cls);
+// Run while recording enemy state transitions: returns [{state, t}]
+function trace(w, e, seconds, ctl) {
+  const out = []; let last = null;
+  run(w, seconds, ctl || {}, i => { const s = e.squad ? e.squad.state : e.state; if (s !== last) { out.push({ state: s, t: i * STEP, warn: e.warn }); last = s; } });
+  return out;
+}
+const godMode = w => { w.player.invuln = 1e9; };
+
+test("Ex pursues Hunter but only over a short distance (leash)", () => {
+  const w = makeWorld(flat({ w: 60, g1: 59, px: 4, extra: [[10, 8, 'x']] })); godMode(w);
+  const e = enemy(w, 'Ex'); let maxAway = 0;
+  run(w, 12, {}, () => { maxAway = Math.max(maxAway, Math.abs(e.cx - e.home)); w.player.x = 4 * T; });
+  return [maxAway > 16 && maxAway <= (EC.ex.leash + 2) * T + 4, `furthest from home ${(maxAway / T).toFixed(1)} tiles (leash ${EC.ex.leash} + 2 for a charge)`];
+});
+test("Ex pauses for dramatic gestures and stands still while flexing", () => {
+  const w = makeWorld(flat({ w: 60, g1: 59, px: 20, extra: [[26, 8, 'x']] })); godMode(w);
+  const e = enemy(w, 'Ex'); let flexMoved = 0, flexed = false;
+  run(w, 6, {}, () => { if (e.state === 'gesture' && e.stateT > 0.02) { flexed = true; flexMoved = Math.max(flexMoved, Math.abs(e.vx)); } });
+  return [flexed && flexMoved === 0, `flexed=${flexed}, speed while flexing=${flexMoved}`];
+});
+test("Ex always telegraphs (with a warning) before charging", () => {
+  const w = makeWorld(flat({ w: 60, g1: 59, px: 20, extra: [[26, 8, 'x']] })); godMode(w);
+  const e = enemy(w, 'Ex');
+  let prev = null, windStart = 0, warned = false, charges = 0, ok = true;
+  run(w, 12, {}, i => {
+    if (e.state !== prev) {
+      if (e.state === 'windup') { windStart = i * STEP; warned = false; }
+      if (e.state === 'charge') { charges++; if (prev !== 'windup' || !warned || i * STEP - windStart < EC.ex.windupTime - 0.01) ok = false; }
+      prev = e.state;
+    }
+    if (e.state === 'windup' && e.warn) warned = true;
+  });
+  ok = ok && charges > 0;
+  return [ok, `charges=${charges}, each preceded by a ${EC.ex.windupTime}s "!" windup=${ok}`];
+});
+test("The final ex takes three hits", () => {
+  const w = makeWorld(flat({ extra: [[12, 8, 'X']] }));
+  const e = enemy(w, 'Ex');
+  const hits = [];
+  for (let i = 0; i < 3; i++) { e.hurtT = 0; hits.push(e.defeat(0)); }
+  return [hits.join() === 'false,false,true' && !e.alive, `defeated after hits: ${hits.join(', ')}`];
+});
+test("Suitors throw slow HEY BEAUTIFUL bubbles that hurt", () => {
+  const w = makeWorld(flat({ w: 40, px: 5, extra: [[12, 8, 's']] }));
+  const e = enemy(w, 'Suitor'); e.dir = -1;
+  let bubble = null;
+  run(w, 4, {}, () => { const b = w.enemyShots.find(s => s.kind === 'hey'); if (b && !bubble) bubble = Object.assign({}, b); });
+  return [bubble && Math.abs(bubble.vx) < 70 && events(w, 'hurt') >= 1, `bubble speed=${bubble && Math.abs(bubble.vx).toFixed(0)}px/s, hurt=${events(w, 'hurt')}`];
+});
+test("Suitors telegraph before every throw", () => {
+  const w = makeWorld(flat({ w: 40, px: 5, extra: [[12, 8, 's']] })); godMode(w);
+  const e = enemy(w, 'Suitor');
+  let ok = true, throws = 0, aimT = 0;
+  run(w, 8, {}, () => { if (e.state === 'aim') aimT += STEP; if (w.enemyShots.length > throws) { if (aimT < EC.suitor.aimTime - 0.01 || !e.warn && e.state !== 'cool') ok = false; throws = w.enemyShots.length; aimT = 0; } });
+  return [ok && throws >= 2, `throws=${throws}, each after a ${EC.suitor.aimTime}s aim=${ok}`];
+});
+test("Adjacent agitators march as one squad, in step", () => {
+  const w = makeWorld(flat({ w: 60, g1: 59, px: 4, extra: [[30, 8, 'a'], [32, 8, 'a'], [34, 8, 'a'], [50, 8, 'a']] })); godMode(w);
+  const ags = w.enemies.filter(e => e.squad);
+  const squads = new Set(ags.map(a => a.squad));
+  let inStep = true;
+  const sq = ags[0].squad, members = sq.members;
+  run(w, 10, {}, () => { if (new Set(members.map(m => m.dir)).size > 1) inStep = false; w.player.x = 26 * T; });
+  return [squads.size === 2 && members.length === 3 && inStep, `squads=${squads.size} (3 + 1), always facing the same way=${inStep}`];
+});
+test("Agitator squads telegraph together before charging", () => {
+  const w = makeWorld(flat({ w: 60, g1: 59, px: 24, extra: [[30, 8, 'a'], [32, 8, 'a'], [34, 8, 'a']] })); godMode(w);
+  const ags = w.enemies.filter(e => e.squad);
+  const tr = trace(w, ags[0], 14, () => { w.player.x = 24 * T; return c(); });
+  const idx = tr.findIndex(s => s.state === 'charge');
+  const prev = tr[idx - 1];
+  return [idx > 0 && prev.state === 'telegraph' && tr[idx].t - prev.t >= EC.agitator.telegraphTime - 0.01, `sequence: ${tr.map(s => s.state).join(' > ')}`];
+});
+test("Preachers lob arcing scrolls that land near Hunter", () => {
+  const map = flat({ w: 40, px: 6, extra: [[13, 6, 'B'], [14, 6, 'B'], [15, 6, 'B'], [14, 5, 'r']] });
+  const w = makeWorld(map); godMode(w);
+  let peakUp = false, landX = null; const target = w.player.x + w.player.w / 2;
+  run(w, 5, {}, () => {
+    const s = w.enemyShots.find(s => s.kind === 'scroll');
+    if (s && s.vy < 0) peakUp = true;
+    if (s && landX === null && s.y >= w.player.y + w.player.h - 8) landX = s.x;
+  });
+  return [peakUp && landX !== null && Math.abs(landX - target) < 24, `arcs upward=${peakUp}, lands ${landX && Math.abs(landX - target).toFixed(0)}px from Hunter`];
+});
+test("Inspectors (cone hat) cannot be stomped: landing on them hurts", () => {
+  const w = makeWorld(flat({ py: 2, px: 10, extra: [[10, 8, 'i']] }));
+  enemy(w, 'Inspector').think = function (dt, w) { this.vx = 0; this.physics(dt, w.level); };
+  run(w, 1.5, {});
+  const e = enemy(w, 'Inspector');
+  return [events(w, 'stomp') === 0 && events(w, 'hurt') >= 1 && e.alive, `stomps=${events(w, 'stomp')} hurt=${events(w, 'hurt')} alive=${e.alive}`];
+});
+test("Inspectors can be defeated with the MALE LONELINESS shot", () => {
+  const w = makeWorld(flat({ px: 3, extra: [[11, 8, 'i']] })); settle(w);
+  w.firing = true; godMode(w);
+  run(w, 1.5, i => c({ firePressed: i === 0 }));
+  return [events(w, 'shotHit') === 1, `hits=${events(w, 'shotHit')}`];
+});
+test("MALE LONELINESS pops HEY BEAUTIFUL bubbles", () => {
+  const w = makeWorld(flat({ w: 40, px: 4, extra: [[16, 8, 's']] })); settle(w); godMode(w);
+  w.firing = true;
+  run(w, 5, i => c({ firePressed: w.enemyShots.some(s => s.kind === 'hey') && i % 30 === 0 }));
+  return [events(w, 'pop') >= 1, `pops=${events(w, 'pop')}`];
+});
+test("Challenge mode speeds up attack tempo", () => {
+  const map = flat({ w: 40, px: 5, extra: [[12, 8, 's']] });
+  const cas = makeWorld(map, LW.Session.create('casual')).enemies[0], cha = makeWorld(map, LW.Session.create('challenge')).enemies[0];
+  return [cha.secs(EC.suitor.cooldown) < cas.secs(EC.suitor.cooldown), `suitor cooldown casual ${cas.secs(EC.suitor.cooldown).toFixed(2)}s vs challenge ${cha.secs(EC.suitor.cooldown).toFixed(2)}s`];
+});
+
+// ---------------------------------------------------------------- the Pontiff
+function bossWorld() {
+  const w = makeWorld(flat({ w: 40, px: 10, extra: [[20, 8, 'O']] })); godMode(w);
+  return w;
+}
+test("Pontiff cycles three distinct attack phases", () => {
+  const w = bossWorld(), b = w.boss, kinds = [new Set(), new Set(), new Set()], seen = new Set();
+  run(w, 60, {}, () => {
+    for (const s of w.enemyShots) if (!seen.has(s)) { seen.add(s); kinds[b.phase].add(s.kind); }
+    if (b.state === 'tired' && b.hurtT <= 0 && b.alive) { b.defeat(0); }
+  });
+  const k = kinds.map(s => [...s].sort().join('+'));
+  return [k[0] === 'scroll' && k[1] === 'blah' && k[2] === 'amen+scroll' && !b.alive, `phase 1: ${k[0]} | phase 2: ${k[1]} | phase 3: ${k[2]} | defeated=${!b.alive}`];
+});
+test("Pontiff is only vulnerable while catching his breath", () => {
+  const w = bossWorld(), b = w.boss;
+  run(w, 2, {});
+  const early = b.defeat(0), hpEarly = b.hp;
+  let tiredAt = null;
+  run(w, 20, {}, i => { if (b.state === 'tired' && tiredAt === null) { tiredAt = i; return false; } });
+  b.defeat(0);
+  return [!early && hpEarly === 3 && b.hp === 2 && b.state === 'angry', `hit while attacking: hp stays ${hpEarly}; hit while tired: hp ${b.hp}, state ${b.state}`];
+});
+test("Pontiff warns before every attack", () => {
+  const w = bossWorld(), b = w.boss;
+  let ok = true, shotsBefore = 0, sawWarn = false;
+  run(w, 20, {}, () => {
+    if (b.warn) sawWarn = true;
+    if (w.enemyShots.length > shotsBefore) { if (!sawWarn) ok = false; sawWarn = false; }
+    shotsBefore = w.enemyShots.length;
+  });
+  return [ok, `every volley preceded by a "!" = ${ok}`];
+});
+test("High BLAH bubbles can be ducked; low ones jumped", () => {
+  const w = makeWorld(flat()); settle(w);
+  const p = w.player, feet = p.y + p.h;
+  const box = (yc, h) => ({ x: p.x, y: yc - h / 2, w: p.w, h });
+  const standHitHigh = LW.Physics.overlap(p, box(feet - 22, 8));
+  run(w, 0.2, { down: true });
+  const crouchHitHigh = LW.Physics.overlap(p, box(feet - 22, 8));
+  const crouchHitLow = LW.Physics.overlap(p, box(feet - 11, 8));
+  return [standHitHigh && !crouchHitHigh && crouchHitLow, `high bubble: hits standing=${standHitHigh}, misses crouching=${!crouchHitHigh}; low bubble must be jumped=${crouchHitLow}`];
+});
+test("Breaking the soapbox completes the level", () => {
+  const w = bossWorld(), b = w.boss;
+  run(w, 60, {}, () => { if (b.state === 'tired' && b.hurtT <= 0 && b.alive) b.defeat(0); if (w.state === 'complete') return false; });
+  return [w.state === 'complete' && events(w, 'bossDefeated') === 1, `state=${w.state}`];
+});
+
+// ---------------------------------------------------------------- hazards
+const HZ = LW.CFG.hazards;
+const hz = (w, kind) => w.hazards.find(h => h.kind === kind);
+test('Moving platform carries Hunter while she stands still', () => {
+  const w = makeWorld(flat({ w: 30, g0: 0, g1: 3, px: 6, py: 6, extra: [[5, 8, 'M']] }));
+  run(w, 0.6, {});
+  const p = w.player, m = hz(w, 'mover');
+  const offset0 = p.x - m.x; let grounded = true, maxDrift = 0;
+  run(w, 3, {}, () => { if (!p.onGround) grounded = false; maxDrift = Math.max(maxDrift, Math.abs((p.x - m.x) - offset0)); });
+  return [grounded && maxDrift < 0.5 && m.x > 5 * T + 8, `stayed on=${grounded}, drift vs platform ${maxDrift.toFixed(2)}px, platform moved ${((m.x - 5 * T) / T).toFixed(1)} tiles`];
+});
+test('Vertical lift raises Hunter', () => {
+  const w = makeWorld(flat({ w: 30, g0: 10, g1: 29, px: 5, py: 6, extra: [[5, 8, 'V']] }));
+  run(w, 0.4, {});
+  const p = w.player, y0 = p.y; let minY = y0;
+  run(w, LW.CFG.hazards.mover.period / LW.CFG.difficulty.casual.hazardSpeed / 2, {}, () => { minY = Math.min(minY, p.y); });
+  return [y0 - minY > 2.5 * T && p.onGround, `lifted ${((y0 - minY) / T).toFixed(1)} tiles`];
+});
+test('Disappearing platforms warn before vanishing, and Hunter falls when they go', () => {
+  const w = makeWorld(flat({ w: 30, g0: 0, g1: 3, px: 6, py: 6, extra: [[6, 8, 'D']] }));
+  const d = hz(w, 'vanish'); const seq = []; let fellAfterGone = false;
+  run(w, 5, {}, () => { if (seq[seq.length - 1] !== d.state) seq.push(d.state); if (d.state === 'gone' && !w.player.onGround && w.player.vy > 0) fellAfterGone = true; });
+  const order = seq.join('>');
+  return [/solid>warn>gone/.test(order) && fellAfterGone, `states: ${order}, fell through=${fellAfterGone}`];
+});
+test('A crumbling bridge can be crossed by running', () => {
+  const ex = []; for (let x = 4; x < 11; x++) ex.push([x, 9, 'D']);
+  const map = flat({ w: 30, g0: 0, g1: 3, px: 1, extra: ex });
+  for (let y = 10; y < 12; y++) map[y] = '####.......' + '#'.repeat(19);
+  map[9] = map[9].slice(0, 11) + '#'.repeat(19);
+  const w = makeWorld(map); settle(w);
+  // start running once the first plank has been back for a second (a learnable moment)
+  const d0 = w.hazards[0], cyc = d0.cycle;
+  run(w, 6, {}, () => { const c = ((d0.t % cyc) + cyc) % cyc; if (c > 1.0 && c < 1.05) return false; });
+  run(w, 2.5, { right: true });
+  return [events(w, 'fell') === 0 && w.player.x > 11 * T, `fell=${events(w, 'fell')}, reached x=${(w.player.x / T).toFixed(1)} tiles`];
+});
+test('Falling blocks shake with a warning before dropping', () => {
+  const w = makeWorld(flat({ w: 30, px: 2, extra: [[8, 5, 'F'], [7, 4, 'B'], [8, 4, 'B'], [9, 4, 'B']] })); godMode(w);
+  const f = hz(w, 'fallBlock'); const seq = []; let warnShown = false;
+  run(w, 4, i => { w.player.x = Math.min(8 * T + 3, w.player.x); return c({ right: true }); }, () => { if (seq[seq.length - 1] !== f.state) seq.push(f.state); if (f.state === 'shake' && f.warn) warnShown = true; });
+  return [seq.slice(0, 4).join('>') === 'idle>shake>fall>rest' && warnShown, `sequence: ${seq.join(' > ')}, "!" shown=${warnShown}`];
+});
+test('A falling block hurts when it lands on Hunter, then rises back', () => {
+  const w = makeWorld(flat({ w: 30, px: 8, extra: [[8, 5, 'F'], [7, 4, 'B'], [8, 4, 'B'], [9, 4, 'B']] }));
+  const f = hz(w, 'fallBlock'); let rose = false;
+  run(w, 8, {}, () => { if (f.state === 'rise') rose = true; });
+  return [events(w, 'hurt') >= 1 && rose, `hurt=${events(w, 'hurt')}, rose back=${rose}`];
+});
+test('Running under a falling block (without stopping) is safe', () => {
+  const w = makeWorld(flat({ w: 30, px: 2, extra: [[10, 5, 'F'], [9, 4, 'B'], [10, 4, 'B'], [11, 4, 'B']] })); settle(w);
+  run(w, 0.5, { right: true }); run(w, 2, { right: true });
+  return [events(w, 'hurt') === 0, `hurt=${events(w, 'hurt')}`];
+});
+test('Swinging signs hit a standing Hunter but can be ducked', () => {
+  const mk = () => makeWorld(flat({ w: 30, px: 8, extra: [[8, 5, 'W'], [7, 4, 'B'], [8, 4, 'B'], [9, 4, 'B']] }));
+  const w1 = mk(); hz(w1, 'swingSign').t = hz(w1, 'swingSign').period / 4; run(w1, 4, {});
+  const w2 = mk(); hz(w2, 'swingSign').t = hz(w2, 'swingSign').period / 4; run(w2, 4, { down: true });
+  return [events(w1, 'hurt') >= 1 && events(w2, 'hurt') === 0, `standing hurt=${events(w1, 'hurt')}, crouching hurt=${events(w2, 'hurt')}`];
+});
+test('Pop-up spikes warn (red tips) before coming out, and only hurt when out', () => {
+  const w = makeWorld(flat({ w: 30, px: 8, py: 7, extra: [[8, 8, 'R']] }));
+  const s = hz(w, 'popSpikes'); const seq = []; let hurtWhileSafe = false, hurtOut = false;
+  run(w, 5, {}, () => {
+    if (seq[seq.length - 1] !== s.state) seq.push(s.state);
+    if (w.events.some(e => e.type === 'hurt')) { if (s.state !== 'out') hurtWhileSafe = true; else hurtOut = true; }
+    w.events.length = 0;
+  });
+  return [/hidden>warn>out/.test(seq.join('>')) && hurtOut && !hurtWhileSafe, `states: ${seq.join('>')}, hurt only when out=${hurtOut && !hurtWhileSafe}`];
+});
+test('Challenge mode runs hazard cycles faster', () => {
+  const map = flat({ extra: [[8, 8, 'R']] });
+  const a = hz(makeWorld(map, LW.Session.create('casual')), 'popSpikes'), b = hz(makeWorld(map, LW.Session.create('challenge')), 'popSpikes');
+  return [b.hiddenT < a.hiddenT && b.warnT === a.warnT, `safe window casual ${a.hiddenT.toFixed(2)}s vs challenge ${b.hiddenT.toFixed(2)}s; warning stays ${a.warnT}s`];
+});
+
+// ---------------------------------------------------------------- the seven levels
+for (const key of LW.LEVEL_ORDER) for (const mode of ['casual', 'challenge']) {
+  test(`${LW.LEVELS[key].name} (${mode}): goal and every collectible reachable`, () => {
+    const r = LW.Reach.check(Object.assign({}, LW.LEVELS[key], { __difficulty: mode }));
+    const ents = new LW.Level(LW.LEVELS[key], { difficulty: mode }).entities;
+    const n = t => ents.filter(e => e.type === t).length;
+    const cps = ents.filter(e => e.type === 'C').map(e => e.tx / new LW.Level(LW.LEVELS[key]).w);
+    const ok = r.goalReached && !r.missing.length && n('b') >= 3 && cps.length === 2 && cps[0] > 0.2 && cps[0] < 0.45 && cps[1] > 0.55 && cps[1] < 0.8;
+    return [ok, `goal=${r.goalReached}, unreachable=[${r.missing.map(m => m.type + '@' + m.tx + ',' + m.ty).join(' ')}], books=${n('b')} tools=${n('t')} cats=${n('K')}, checkpoints at ${cps.map(c => Math.round(c * 100) + '%').join(' & ')}`];
+  });
+}
+
+// ---------------------------------------------------------------- run
+const out = document.getElementById('out');
+let pass = 0;
+for (const [name, fn] of tests) {
+  let ok, info;
+  try { [ok, info] = fn(); } catch (err) { ok = false; info = err.stack; }
+  if (ok) pass++;
+  const li = document.createElement('li');
+  li.innerHTML = `<span class="${ok ? 'pass' : 'fail'}">${ok ? 'PASS' : 'FAIL'}</span> ${name} <small>— ${info}</small>`;
+  out.appendChild(li);
+}
+const summary = `${pass}/${tests.length} passed`;
+document.getElementById('summary').innerHTML = `<b class="${pass === tests.length ? 'pass' : 'fail'}">${summary}</b>`;
+document.title = summary;
+window.TEST_RESULTS = { pass, total: tests.length, text: out.innerText };
+</script>
+</body>
+</html>

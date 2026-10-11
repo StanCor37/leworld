@@ -1,0 +1,6 @@
+# working files, not part of the game
+tools/snaps/
+dist/
+LeWorld.zip
+.claude/
+__pycache__/

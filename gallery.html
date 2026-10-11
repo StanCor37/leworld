@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LeWorld – Graphics Gallery</title>
+<style>
+  :root { --bg: #1a1423; --panel: #2b2633; --ink: #fff8e7; --accent: #ff4f8a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.4 system-ui, sans-serif; }
+  header { padding: 12px 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  h1 { font-size: 18px; margin: 0 12px 0 0; color: var(--accent); }
+  h2 { font-size: 15px; margin: 20px 16px 8px; color: #ffd23f; }
+  button { background: var(--panel); color: var(--ink); border: 2px solid #4a4458; padding: 6px 10px; border-radius: 4px; cursor: pointer; font: inherit; }
+  button.on { border-color: var(--accent); background: #4a1e3a; }
+  .wrap { padding: 0 16px 16px; }
+  canvas { image-rendering: pixelated; image-rendering: crisp-edges; display: block; max-width: 100%; background: #000; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; }
+  .note { opacity: .7; font-size: 12px; margin: 4px 16px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>LeWorld · graphics gallery</h1>
+  <div class="row" id="themes"></div>
+</header>
+<div class="wrap"><canvas id="scene" width="320" height="180"></canvas></div>
+<p class="note">Internal resolution 320×180, scaled with nearest-neighbour. Scene pans automatically; Hunter cycles through every animation.</p>
+
+<h2>Story UI</h2>
+<div class="row wrap">
+  <button data-ui="chat" class="on">LeMatch chat</button>
+  <button data-ui="match">Match splash</button>
+  <button data-ui="dialog">Dialogue box</button>
+  <button data-ui="touch">Touch controls</button>
+</div>
+<div class="wrap"><canvas id="ui" width="320" height="180"></canvas></div>
+
+<h2>Sprite sheet</h2>
+<div class="wrap"><canvas id="sheet"></canvas></div>
+
+<script src="src/gfx/core.js"></script>
+<script src="src/gfx/font.js"></script>
+<script src="src/gfx/sprites.js"></script>
+<script src="src/gfx/tiles.js"></script>
+<script src="src/gfx/backgrounds.js"></script>
+<script src="src/gfx/ui.js"></script>
+<script>
+LW.Sprites.build();
+const P = LW.PAL, F = LW.Font, S = LW.Sprites, T = LW.TILE;
+
+function scaleCanvas(c, k) {
+  const fit = () => {
+    const max = Math.min(k, Math.floor((document.body.clientWidth - 32) / c.width) || 1);
+    c.style.width = c.width * Math.max(1, max) + 'px';
+  };
+  fit(); addEventListener('resize', fit);
+}
+
+// ------------------------------------------------------------------ SCENE
+const THEMES = ['street', 'avenue', 'country', 'industrial', 'train', 'palace', 'sunset'];
+const ENEMIES = {
+  street: [['ex_walk', 'ex_gesture', 'ex_charge']],
+  avenue: [['suitor_walk', 'suitor_throw'], ['suitor2_walk', 'suitor2_throw']],
+  country: [['suitor_walk'], ['inspector_walk']],
+  industrial: [['agitator_march', 'agitator_telegraph', 'agitator_charge'], ['agitator_march']],
+  train: [['preacher_idle', 'preacher_throw'], ['inspector_walk']],
+  palace: [['pontiff_idle', 'pontiff_preach', 'pontiff_hurt']],
+  sunset: [['ex_walk', 'ex_gesture', 'ex_charge'], ['chloe_wave', 'chloe_idle', 'chloe_phone']]
+};
+const SIGNS = { street: 'SALE', avenue: 'U UP?', country: 'BRIDGE OUT', industrial: 'KEEP OUT', train: 'REPENT', palace: 'SILENCE', sunset: 'CAFE >' };
+let theme = 'street';
+const themeBar = document.getElementById('themes');
+THEMES.forEach((th, i) => {
+  const b = document.createElement('button');
+  b.textContent = (i + 1) + '. ' + LW.Tiles.THEMES[th].label;
+  b.onclick = () => { theme = th; [...themeBar.children].forEach(x => x.classList.toggle('on', x === b)); };
+  if (!i) b.classList.add('on');
+  themeBar.appendChild(b);
+});
+
+const scene = document.getElementById('scene'), sctx = scene.getContext('2d');
+sctx.imageSmoothingEnabled = false;
+scaleCanvas(scene, 4);
+
+// A tiny static map in world tiles (40 wide). '#' top, '=' fill, 'B' block, '-' ledge, '^' spikes
+const MAP = [
+  '........................................',
+  '........................................',
+  '........................................',
+  '........................................',
+  '.............BBB..........-----.........',
+  '........................................',
+  '.....---..............BB................',
+  '..........................B.........BB..',
+  '#########...#####^^#######....##########',
+  '=========...##########====....==========',
+  '=========...==========####....==========',
+  '=========...==========================..'
+].map(r => r.replace(/#/g, '#'));
+const WORLD_W = MAP[0].length * T;
+
+const HUNTER_ANIMS = [['hunter_idle', 6], ['hunter_run', 12], ['hunter_jump', 1], ['hunter_fall', 1], ['hunter_crouch', 1], ['hunter_fire', 6], ['hunter_hurt', 1], ['hunter_win', 4]];
+
+function drawTiles(ctx, cam) {
+  for (let y = 0; y < MAP.length; y++) for (let x = 0; x < MAP[y].length; x++) {
+    const ch = MAP[y][x];
+    let kind = null;
+    if (ch === '#') kind = (y > 0 && MAP[y - 1][x] !== '.') ? 'fill' : 'top';
+    else if (ch === '=') kind = 'fill';
+    else if (ch === 'B') kind = 'block';
+    else if (ch === '-') kind = 'plat';
+    const sx = x * T - cam, sy = y * T - 12;
+    if (sx < -T || sx > LW.VIEW_W) continue;
+    if (kind) ctx.drawImage(LW.Tiles.tile(theme, kind, (x * 7 + y * 3) % 4), sx, sy);
+    if (ch === '^') { ctx.drawImage(LW.Tiles.tile(theme, 'fill', 0), sx, sy); S.draw(ctx, 'spikes', 0, sx, sy, { topLeft: true }); }
+  }
+}
+
+function frameScene(t) {
+  const ctx = sctx;
+  const cam = Math.round((Math.sin(t * 0.15) * 0.5 + 0.5) * (WORLD_W - LW.VIEW_W));
+  LW.Backgrounds.draw(ctx, theme, cam, t);
+  drawTiles(ctx, cam);
+  const gy = 8 * T - 12; // ground surface y in screen space
+
+  // checkpoint + goal
+  S.draw(ctx, (t % 4 < 2) ? 'checkpoint_off' : 'checkpoint_on', Math.floor(t * 4), 3 * T - cam, gy);
+  S.draw(ctx, 'goal_gate', 0, 37 * T - cam, gy);
+
+  // collectibles bobbing
+  const bob = Math.round(Math.sin(t * 4) * 2);
+  ['book', 'book_teal', 'book_orange', 'book_pink'].forEach((b, i) => S.draw(ctx, b, 0, (14 + i) * T - cam, 4 * T - 14 + bob));
+  ['tool_drill', 'tool_hammer', 'tool_wrench', 'tool_saw'].forEach((b, i) => S.draw(ctx, b, 0, (5 + i * 1.2) * T - cam, gy - 22 + bob));
+  S.draw(ctx, 'sparkle', Math.floor(t * 8), 16 * T - cam, 3 * T - 12);
+
+  // moving platform + vanishing platforms + swinging sign + retracting spikes
+  const mpx = 28 * T + Math.sin(t * 1.2) * 24;
+  ctx.drawImage(LW.Props.movingPlatform(theme, 2), Math.round(mpx - cam), 6 * T - 12);
+  const vf = Math.floor(t * 1.5) % 4;
+  for (let i = 0; i < 3; i++) ctx.drawImage(LW.Props.vanishPlatform(Math.min(2, (vf + i) % 4 === 3 ? 2 : ((vf + i) % 4 === 2 ? 1 : 0))), (9 + i) * T - cam, 7 * T - 12);
+  LW.Props.drawSwingSign(ctx, 22 * T - cam, 2 * T, Math.sin(t * 2) * 0.6, 22, SIGNS[theme]);
+  const rs = Math.floor(t * 1.2) % 3;
+  S.draw(ctx, 'spikes_retract', rs, 34 * T - cam, gy - 16 + 16, {});
+  if (rs === 1) LW.Props.drawWarning(ctx, 34 * T - cam, gy - 14, t);
+  S.draw(ctx, 'falling_block', 0, 25 * T - cam + (Math.floor(t * 20) % 2), 3 * T, {});
+
+  // enemies
+  (ENEMIES[theme] || []).forEach((anims, i) => {
+    const which = anims[Math.floor(t / 2.5) % anims.length];
+    const ex = (18 + i * 6) * T + Math.sin(t * 0.8 + i) * 20;
+    const flip = Math.cos(t * 0.8 + i) < 0;
+    S.draw(ctx, which, Math.floor(t * 5), ex - cam, gy, { flip, rim: LW.Backgrounds.rim(theme) });
+  });
+  if (theme === 'palace') ctx.drawImage(LW.Props.soapbox(Math.floor(t / 2) % 4), 18 * T - cam - 24, gy - 2);
+
+  // projectiles
+  const pj = (t * 60) % 360;
+  LW.Props.drawLonelinessShot(ctx, 20, 76, 1, (t * 90) % 340, t);
+  if (theme === 'avenue') ctx.drawImage(LW.Props.PROJ.heyBeautiful(), Math.round(320 - pj * 0.5), 60);
+  if (theme === 'train' || theme === 'palace') {
+    const ph = (t * 0.8) % 1;
+    S.draw(ctx, 'scroll', Math.floor(t * 10), 200 + ph * 80, 60 + (ph - 0.5) * (ph - 0.5) * 160);
+  }
+
+  // Hunter: cycle animations, 2.5s each
+  const ai = Math.floor(t / 2.5) % HUNTER_ANIMS.length;
+  const [an, fps] = HUNTER_ANIMS[ai];
+  const hx = 6 * T + 8 + (an === 'hunter_run' ? (t % 2.5) * 30 : 0);
+  const hy = an === 'hunter_jump' ? gy - 20 : an === 'hunter_fall' ? gy - 10 : gy;
+  const flash = an === 'hunter_hurt' && Math.floor(t * 12) % 2;
+  S.draw(ctx, an, Math.floor(t * fps), hx - cam, hy, { flash, rim: LW.Backgrounds.rim(theme) });
+  if (an === 'hunter_run' && Math.floor(t * 12) % 4 === 0) S.draw(ctx, 'dust', Math.floor(t * 12) % 3, hx - cam - 8, gy);
+  if (an === 'hunter_win') S.draw(ctx, 'star', 0, hx - cam + 8, hy - 30 + bob);
+
+  LW.UI.drawHUD(ctx, {
+    level: THEMES.indexOf(theme) + 1, levelName: LW.Tiles.THEMES[theme].label,
+    hearts: 1 + Math.floor(t / 3) % 3, score: Math.floor(t * 50) * 10,
+    books: Math.floor(t / 2) % 4, booksNeeded: 3, firing: Math.floor(t / 2) % 4 === 3, cooldown: (t * 2) % 1,
+    tools: Math.floor(t) % 3, toolsPerCharge: 3, charge: Math.floor(t / 4) % 2, muted: false
+  });
+}
+
+// ------------------------------------------------------------------ STORY UI
+const uiC = document.getElementById('ui'), uctx = uiC.getContext('2d');
+uctx.imageSmoothingEnabled = false;
+scaleCanvas(uiC, 4);
+let uiMode = 'chat';
+document.querySelectorAll('[data-ui]').forEach(b => b.onclick = () => {
+  uiMode = b.dataset.ui; document.querySelectorAll('[data-ui]').forEach(x => x.classList.toggle('on', x === b));
+});
+const CHAT = [['them', 'Coffee?'], ['me', 'Absolutely. Where?'], ['them', 'There might be a small geographical complication.'], ['me', 'I own sensible boots.']];
+
+function frameUI(t) {
+  const ctx = uctx;
+  if (uiMode === 'match') return LW.UI.matchSplash(ctx, t);
+  LW.Backgrounds.draw(ctx, 'sunset', t * 20, t);
+  if (uiMode === 'chat') {
+    ctx.globalAlpha = 0.6; ctx.fillStyle = P.k; ctx.fillRect(0, 0, 320, 180); ctx.globalAlpha = 1;
+    const scr = LW.UI.phone(ctx, 160, 8, 150, 160);
+    let y = scr.y + 6;
+    const n = Math.min(CHAT.length, 1 + Math.floor((t % 8) / 1.5));
+    for (let i = 0; i < n; i++) y += LW.UI.chatBubble(ctx, scr, y, CHAT[i][0], CHAT[i][1]);
+    if (n < CHAT.length && Math.floor(t * 3) % 2) F.draw(ctx, '...', scr.x + 20, y + 2, { color: '#a07090' });
+    S.draw(ctx, 'hunter_idle', Math.floor(t * 2), 40, 170);
+    S.draw(ctx, 'chloe_phone', 0, 280, 170, { flip: true });
+  } else if (uiMode === 'dialog') {
+    S.draw(ctx, 'hunter_win', Math.floor(t * 3), 120, 120);
+    S.draw(ctx, 'chloe_wave', Math.floor(t * 3), 200, 120, { flip: true });
+    const lines = [['chloe', "How's the trip?"], ['hunter', 'Someone tried to debate my existence. I jumped over him.'], ['chloe', 'Good. I booked us a table.']];
+    const [who, text] = lines[Math.floor(t / 2.5) % 3];
+    LW.UI.dialogBox(ctx, who, text);
+  } else if (uiMode === 'touch') {
+    ctx.globalAlpha = 0.6; ctx.fillStyle = P.k; ctx.fillRect(0, 0, 320, 180); ctx.globalAlpha = 1;
+    const p = Math.floor(t * 2) % 5;
+    LW.UI.touchButton(ctx, 28, 150, 18, 'left', p === 0);
+    LW.UI.touchButton(ctx, 70, 150, 18, 'right', p === 1);
+    LW.UI.touchButton(ctx, 49, 118, 11, 'down', p === 2);
+    LW.UI.touchButton(ctx, 250, 150, 18, 'fire', p === 3);
+    LW.UI.touchButton(ctx, 292, 132, 20, 'jump', p === 4);
+    LW.UI.smallButton(ctx, 302, 4, 'pause');
+    F.draw(ctx, 'ROTATE YOUR PHONE FOR THE FULL ADVENTURE', 160, 60, { color: P.g, align: 'center' });
+  }
+}
+
+// ------------------------------------------------------------------ SHEET
+const sheet = document.getElementById('sheet'), shctx = sheet.getContext('2d');
+const names = S.names();
+const COLS = 8, CW = 40, CH = 64;
+sheet.width = COLS * CW; sheet.height = Math.ceil(names.length / COLS) * CH;
+shctx.imageSmoothingEnabled = false;
+scaleCanvas(sheet, 3);
+function frameSheet(t) {
+  const ctx = shctx;
+  ctx.fillStyle = '#3a3248'; ctx.fillRect(0, 0, sheet.width, sheet.height);
+  names.forEach((n, i) => {
+    const x = (i % COLS) * CW, y = Math.floor(i / COLS) * CH;
+    ctx.fillStyle = (i + Math.floor(i / COLS)) % 2 ? '#443a54' : '#3a3248';
+    ctx.fillRect(x, y, CW, CH);
+    S.draw(ctx, n, Math.floor(t * 4), x + CW / 2, y + CH - 12);
+    const label = n.replace(/_/g, ' ');
+    F.draw(ctx, label.slice(0, 9), x + 2, y + CH - 9, { color: '#d9d0c0' });
+    if (label.length > 9) F.draw(ctx, label.slice(9, 18), x + 2, y + 2, { color: '#d9d0c0' });
+  });
+}
+
+// Dev helpers: save upscaled canvas snapshots through tools/devserver.py.
+function upscale(c, k) {
+  const o = LW.makeCanvas(c.width * k, c.height * k);
+  const x = o.getContext('2d'); x.imageSmoothingEnabled = false;
+  x.drawImage(c, 0, 0, o.width, o.height);
+  return o;
+}
+window.snap = (name, c, k) => fetch('/snap?name=' + name, { method: 'POST', body: upscale(c, k || 3).toDataURL() });
+window.snapScenes = async (t) => {
+  window.FREEZE = t;
+  for (const th of THEMES) { theme = th; frameScene(t); await snap('scene_' + th, scene); }
+  window.FREEZE = null;
+};
+window.snapUI = async (t) => {
+  window.FREEZE = t;
+  for (const m of ['chat', 'match', 'dialog', 'touch']) { uiMode = m; frameUI(t); await snap('ui_' + m, uiC); }
+  window.FREEZE = null;
+};
+window.snapSheet = async (t) => { frameSheet(t || 0); await snap('sheet', sheet, 4); };
+
+const t0 = performance.now();
+(function loop() {
+  const t = window.FREEZE != null ? window.FREEZE : (performance.now() - t0) / 1000;
+  frameScene(t); frameUI(t); frameSheet(t);
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
